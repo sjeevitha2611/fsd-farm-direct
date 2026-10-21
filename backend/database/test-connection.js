@@ -1,11 +1,12 @@
-import pool, { testConnection } from '../config/db.js'
+import mongoose from 'mongoose'
+import { testConnection } from '../config/db.js'
 
 try {
   await testConnection()
-  console.log('MySQL connection successful')
+  console.log('MongoDB connection successful')
 } catch (error) {
-  console.error('MySQL connection failed:', error.code || error.message)
+  console.error('MongoDB connection failed:', error.name || 'connection error')
   process.exitCode = 1
 } finally {
-  await pool.end()
+  await mongoose.disconnect()
 }

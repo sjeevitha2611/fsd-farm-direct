@@ -1,28 +1,25 @@
 import dotenv from 'dotenv'
-import mysql from 'mysql2/promise'
+import mongoose from 'mongoose'
 
 dotenv.config()
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  port: Number(process.env.DB_PORT) || 3306,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-})
-
-export async function testConnection() {
-  const connection = await pool.getConnection()
-
-  try {
-    await connection.ping()
-    return true
-  } finally {
-    connection.release()
+export async function connectDatabase() {
+  const uri = process.env.MONGODB_URI
+  if (!uri) {
+    throw new Error('MONGODB_URI is not configured')
   }
+
+  if (mongoose.connection.readyState !== 1) {
+    await mongoose.connect(uri, { serverSelectionTimeoutMS: 5000 })
+  }
+
+  return mongoose.connection
 }
 
-export default pool
+export async function testConnection() {
+  const connection = await connectDatabase()
+  await connection.db.admin().ping()
+  return true
+}
+
+export default mongoose

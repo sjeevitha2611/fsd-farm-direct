@@ -1,20 +1,10 @@
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
-import pool from '../config/db.js'
+import User from '../models/User.js'
+import { serializeUser } from '../utils/serializers.js'
 
 const publicRegistrationRoles = new Set(['farmer', 'customer'])
-const saltRounds = 12
 const maxBcryptPasswordBytes = 72
-
-function safeUser(user) {
-  return {
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    phone: user.phone,
-    role: user.role,
-  }
-}
 
 function createToken(user) {
   const secret = process.env.JWT_SECRET
@@ -23,7 +13,7 @@ function createToken(user) {
   }
 
   return jwt.sign(
-    { id: user.id, email: user.email, role: user.role },
+    { id: user._id.toString(), email: user.email, role: user.role },
     secret,
     { expiresIn: '1d' },
   )
@@ -48,36 +38,17 @@ export async function register(request, response) {
     return response.status(400).json({ success: false, message: 'Invalid registration details' })
   }
 
-  const normalizedEmail = email.trim().toLowerCase()
-  const assignedRole = role ?? 'customer'
-
   try {
-    const [existingUsers] = await pool.execute(
-      'SELECT id FROM users WHERE email = ? LIMIT 1',
-      [normalizedEmail],
-    )
-
-    if (existingUsers.length > 0) {
-      return response.status(409).json({ success: false, message: 'Email is already registered' })
-    }
-
-    const hashedPassword = await bcrypt.hash(password, saltRounds)
-    const [result] = await pool.execute(
-      'INSERT INTO users (name, email, `password`, phone, role) VALUES (?, ?, ?, ?, ?)',
-      [name.trim(), normalizedEmail, hashedPassword, phone ?? null, assignedRole],
-    )
-
-    const user = {
-      id: result.insertId,
+    const user = await User.create({
       name: name.trim(),
-      email: normalizedEmail,
+      email: email.trim().toLowerCase(),
+      password,
       phone: phone ?? null,
-      role: assignedRole,
-    }
-
-    return response.status(201).json({ success: true, user })
+      role: role ?? 'customer',
+    })
+    return response.status(201).json({ success: true, user: serializeUser(user) })
   } catch (error) {
-    if (error.code === 'ER_DUP_ENTRY') {
+    if (error.code === 11000) {
       return response.status(409).json({ success: false, message: 'Email is already registered' })
     }
 
@@ -94,24 +65,28 @@ export async function login(request, response) {
   }
 
   try {
-    const [users] = await pool.execute(
-      'SELECT id, name, email, `password`, phone, role FROM users WHERE email = ? LIMIT 1',
-      [email.trim().toLowerCase()],
-    )
-    const user = users[0]
-
+    const user = await User.findOne({ email: email.trim().toLowerCase() }).select('+password')
     if (!user || !(await bcrypt.compare(password, user.password))) {
       return response.status(401).json({ success: false, message: 'Invalid email or password' })
     }
 
     const token = createToken(user)
-    return response.json({ success: true, token, user: safeUser(user) })
+    return response.json({ success: true, token, user: serializeUser(user) })
   } catch (error) {
     console.error('Login failed:', error)
     return response.status(500).json({ success: false, message: 'Login failed' })
   }
 }
 
-export function getCurrentUser(request, response) {
-  return response.json({ success: true, user: safeUser(request.user) })
+export async function getCurrentUser(request, response) {
+  try {
+    const user = await User.findById(request.user.id)
+    if (!user) {
+      return response.status(401).json({ success: false, message: 'Authenticated user no longer exists' })
+    }
+    return response.json({ success: true, user: serializeUser(user) })
+  } catch (error) {
+    console.error('Failed to retrieve authenticated user:', error)
+    return response.status(500).json({ success: false, message: 'Failed to retrieve authenticated user' })
+  }
 }

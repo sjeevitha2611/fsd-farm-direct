@@ -1,32 +1,39 @@
-import pool from '../config/db.js'
+import Order from '../models/Order.js'
+import Product from '../models/Product.js'
+import User from '../models/User.js'
+import { serializeProduct, serializeUser } from '../utils/serializers.js'
+
+function productForResponse(request, product) {
+  const serialized = serializeProduct(product)
+  if (serialized.image_url?.startsWith('/uploads/')) {
+    serialized.image_url = `${request.protocol}://${request.get('host')}${serialized.image_url}`
+  }
+  return serialized
+}
 
 export async function getOverview(request, response) {
   try {
-    const [[users]] = await pool.execute('SELECT COUNT(*) AS total FROM users')
-    const [[products]] = await pool.execute(
-      `SELECT COUNT(*) AS total,
-              SUM(availability = 'AVAILABLE') AS available
-       FROM products`,
-    )
-    const [[orders]] = await pool.execute(
-      `SELECT COUNT(*) AS total,
-              SUM(status IN ('PLACED', 'CONFIRMED', 'PREPARING')) AS pending
-       FROM orders`,
-    )
-    const [[sales]] = await pool.execute(
-      `SELECT COALESCE(SUM(total_amount), 0) AS total
-       FROM orders WHERE status != 'CANCELLED'`,
-    )
+    const [users, products, availableProducts, orders, pendingOrders, sales] = await Promise.all([
+      User.countDocuments(),
+      Product.countDocuments(),
+      Product.countDocuments({ availability: 'AVAILABLE' }),
+      Order.countDocuments(),
+      Order.countDocuments({ status: { $in: ['PLACED', 'CONFIRMED', 'PREPARING'] } }),
+      Order.aggregate([
+        { $match: { status: { $ne: 'CANCELLED' } } },
+        { $group: { _id: null, total: { $sum: '$total_amount' } } },
+      ]),
+    ])
     return response.json({
       success: true,
       message: 'Admin overview retrieved',
       data: {
-        users: Number(users.total),
-        products: Number(products.total),
-        available_products: Number(products.available || 0),
-        orders: Number(orders.total),
-        pending_orders: Number(orders.pending || 0),
-        sales: sales.total,
+        users,
+        products,
+        available_products: availableProducts,
+        orders,
+        pending_orders: pendingOrders,
+        sales: Number((sales[0]?.total ?? 0).toFixed(2)),
       },
     })
   } catch (error) {
@@ -37,10 +44,12 @@ export async function getOverview(request, response) {
 
 export async function listUsers(request, response) {
   try {
-    const [users] = await pool.execute(
-      'SELECT id, name, email, phone, role, created_at FROM users ORDER BY created_at DESC, id DESC',
-    )
-    return response.json({ success: true, message: 'Users retrieved', data: users })
+    const users = await User.find().sort({ created_at: -1, _id: -1 }).lean()
+    return response.json({
+      success: true,
+      message: 'Users retrieved',
+      data: users.map(serializeUser),
+    })
   } catch (error) {
     console.error('Failed to retrieve users:', error)
     return response.status(500).json({ success: false, message: 'Failed to retrieve users', data: null })
@@ -49,12 +58,12 @@ export async function listUsers(request, response) {
 
 export async function listProducts(request, response) {
   try {
-    const [products] = await pool.execute(
-      `SELECT id, farmer_id, name, description, category, price, quantity, unit,
-              image AS image_url, availability, created_at, updated_at
-       FROM products ORDER BY created_at DESC, id DESC`,
-    )
-    return response.json({ success: true, message: 'Products retrieved', data: products })
+    const products = await Product.find().sort({ created_at: -1, _id: -1 }).lean()
+    return response.json({
+      success: true,
+      message: 'Products retrieved',
+      data: products.map((product) => productForResponse(request, product)),
+    })
   } catch (error) {
     console.error('Failed to retrieve admin products:', error)
     return response.status(500).json({ success: false, message: 'Failed to retrieve products', data: null })

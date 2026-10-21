@@ -1,33 +1,19 @@
 import { unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import pool from '../config/db.js'
+import Product from '../models/Product.js'
+import { idString, serializeProduct } from '../utils/serializers.js'
 
 const productFields = ['name', 'description', 'category', 'price', 'quantity', 'unit', 'image_url']
-const productSelect = `
-  SELECT
-    id,
-    farmer_id,
-    name,
-    description,
-    category,
-    price,
-    quantity,
-    unit,
-    image AS image_url,
-    availability,
-    created_at,
-    updated_at
-  FROM products
-`
+const requiredFields = ['name', 'category', 'price', 'quantity', 'unit']
 const uploadedImagesDirectory = fileURLToPath(new URL('../uploads/products/', import.meta.url))
 
 function productForResponse(request, product) {
-  if (!product?.image_url || !product.image_url.startsWith('/uploads/')) return product
-  return {
-    ...product,
-    image_url: `${request.protocol}://${request.get('host')}${product.image_url}`,
+  const serialized = serializeProduct(product)
+  if (serialized.image_url?.startsWith('/uploads/')) {
+    serialized.image_url = `${request.protocol}://${request.get('host')}${serialized.image_url}`
   }
+  return serialized
 }
 
 function uploadedImagePath(request) {
@@ -35,7 +21,8 @@ function uploadedImagePath(request) {
 }
 
 function normalizeImageUrl(request, value) {
-  if (typeof value !== 'string' || !value.startsWith(`${request.protocol}://${request.get('host')}/uploads/products/`)) {
+  const origin = `${request.protocol}://${request.get('host')}`
+  if (typeof value !== 'string' || !value.startsWith(`${origin}/uploads/products/`)) {
     return value
   }
   try {
@@ -69,7 +56,7 @@ async function removeStoredUpload(image) {
 }
 
 function isValidId(id) {
-  return typeof id === 'string' && /^[1-9]\d*$/.test(id)
+  return typeof id === 'string' && /^[\da-f]{24}$/i.test(id)
 }
 
 function validateProductFields(body, partial = false) {
@@ -85,7 +72,7 @@ function validateProductFields(body, partial = false) {
   const fields = {}
   for (const field of productFields) {
     if (!Object.hasOwn(body, field)) {
-      if (!partial && ['name', 'category', 'price', 'quantity', 'unit'].includes(field)) {
+      if (!partial && requiredFields.includes(field)) {
         return { error: `${field} is required` }
       }
       continue
@@ -107,7 +94,7 @@ function validateProductFields(body, partial = false) {
       ) {
         return { error: `${field} must be a non-negative number with at most two decimal places` }
       }
-      fields[field] = numericValue
+      fields[field] = Number(numericValue)
     } else if (field === 'description') {
       if (value !== null && (typeof value !== 'string' || value.length > 65535)) {
         return { error: 'description must be a string or null' }
@@ -117,7 +104,7 @@ function validateProductFields(body, partial = false) {
       if (value !== null && (typeof value !== 'string' || value.length > 2048)) {
         return { error: 'image_url must be a string of at most 2048 characters or null' }
       }
-      fields[field] = value
+      fields.image = value
     }
   }
 
@@ -130,10 +117,12 @@ function validateProductFields(body, partial = false) {
 
 export async function listProducts(request, response) {
   try {
-    const [products] = await pool.execute(
-      `${productSelect} WHERE availability = 'AVAILABLE' ORDER BY created_at DESC, id DESC`,
-    )
-    return response.json({ success: true, message: 'Products retrieved', data: products.map((product) => productForResponse(request, product)) })
+    const products = await Product.find({ availability: 'AVAILABLE' }).sort({ created_at: -1, _id: -1 }).lean()
+    return response.json({
+      success: true,
+      message: 'Products retrieved',
+      data: products.map((product) => productForResponse(request, product)),
+    })
   } catch (error) {
     console.error('Failed to retrieve products:', error)
     return response.status(500).json({ success: false, message: 'Failed to retrieve products', data: null })
@@ -146,14 +135,11 @@ export async function getProduct(request, response) {
   }
 
   try {
-    const [products] = await pool.execute(
-      `${productSelect} WHERE id = ? LIMIT 1`,
-      [request.params.id],
-    )
-    if (products.length === 0) {
+    const product = await Product.findById(request.params.id).lean()
+    if (!product) {
       return response.status(404).json({ success: false, message: 'Product not found', data: null })
     }
-    return response.json({ success: true, message: 'Product retrieved', data: productForResponse(request, products[0]) })
+    return response.json({ success: true, message: 'Product retrieved', data: productForResponse(request, product) })
   } catch (error) {
     console.error('Failed to retrieve product:', error)
     return response.status(500).json({ success: false, message: 'Failed to retrieve product', data: null })
@@ -162,11 +148,12 @@ export async function getProduct(request, response) {
 
 export async function listFarmerProducts(request, response) {
   try {
-    const [products] = await pool.execute(
-      `${productSelect} WHERE farmer_id = ? ORDER BY created_at DESC, id DESC`,
-      [request.user.id],
-    )
-    return response.json({ success: true, message: 'Farmer products retrieved', data: products.map((product) => productForResponse(request, product)) })
+    const products = await Product.find({ farmer_id: request.user.id }).sort({ created_at: -1, _id: -1 }).lean()
+    return response.json({
+      success: true,
+      message: 'Farmer products retrieved',
+      data: products.map((product) => productForResponse(request, product)),
+    })
   } catch (error) {
     console.error('Failed to retrieve farmer products:', error)
     return response.status(500).json({ success: false, message: 'Failed to retrieve farmer products', data: null })
@@ -183,22 +170,16 @@ export async function createProduct(request, response) {
     return response.status(400).json({ success: false, message: validation.error, data: null })
   }
 
-  const { name, description, category, price, quantity, unit, image_url } = validation.fields
   try {
-    const [result] = await pool.execute(
-      `INSERT INTO products
-        (farmer_id, name, description, category, price, quantity, unit, image)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [request.user.id, name, description ?? null, category, price, quantity, unit, image_url ?? null],
-    )
-    const [products] = await pool.execute(
-      `${productSelect} WHERE id = ? LIMIT 1`,
-      [result.insertId],
-    )
+    const product = await Product.create({
+      ...validation.fields,
+      farmer_id: request.user.id,
+      image: validation.fields.image ?? null,
+    })
     return response.status(201).json({
       success: true,
       message: 'Product created',
-      data: productForResponse(request, products[0]),
+      data: productForResponse(request, product),
     })
   } catch (error) {
     await removeRequestUpload(request)
@@ -223,48 +204,27 @@ export async function updateProduct(request, response) {
 
   let imageSaved = false
   try {
-    const [products] = await pool.execute(
-      'SELECT id, farmer_id, image FROM products WHERE id = ? LIMIT 1',
-      [request.params.id],
-    )
-    if (products.length === 0) {
+    const product = await Product.findById(request.params.id)
+    if (!product) {
       await removeRequestUpload(request)
       return response.status(404).json({ success: false, message: 'Product not found', data: null })
     }
-    if (String(products[0].farmer_id) !== String(request.user.id)) {
+    if (idString(product.farmer_id) !== request.user.id) {
       await removeRequestUpload(request)
       return response.status(403).json({ success: false, message: 'You do not own this product', data: null })
     }
 
-    const fields = validation.fields
-    const columns = {
-      name: 'name',
-      description: 'description',
-      category: 'category',
-      price: 'price',
-      quantity: 'quantity',
-      unit: 'unit',
-      image_url: 'image',
-    }
-    const assignments = Object.keys(fields).map((field) => `${columns[field]} = ?`)
-    const values = Object.keys(fields).map((field) => fields[field])
-
-    await pool.execute(
-      `UPDATE products SET ${assignments.join(', ')} WHERE id = ? AND farmer_id = ?`,
-      [...values, request.params.id, request.user.id],
-    )
+    const previousImage = product.image
+    Object.assign(product, validation.fields)
+    await product.save()
     imageSaved = true
-    if (request.file && products[0].image !== fields.image_url) {
-      await removeStoredUpload(products[0].image)
+    if (request.file && previousImage !== product.image) {
+      await removeStoredUpload(previousImage)
     }
-    const [updatedProducts] = await pool.execute(
-      `${productSelect} WHERE id = ? LIMIT 1`,
-      [request.params.id],
-    )
     return response.json({
       success: true,
       message: 'Product updated',
-      data: productForResponse(request, updatedProducts[0]),
+      data: productForResponse(request, product),
     })
   } catch (error) {
     if (!imageSaved) await removeRequestUpload(request)
@@ -279,25 +239,20 @@ export async function deleteProduct(request, response) {
   }
 
   try {
-    const [products] = await pool.execute(
-      'SELECT id, farmer_id, availability FROM products WHERE id = ? LIMIT 1',
-      [request.params.id],
-    )
-    if (products.length === 0) {
+    const product = await Product.findById(request.params.id)
+    if (!product) {
       return response.status(404).json({ success: false, message: 'Product not found', data: null })
     }
-    if (String(products[0].farmer_id) !== String(request.user.id)) {
+    if (idString(product.farmer_id) !== request.user.id) {
       return response.status(403).json({ success: false, message: 'You do not own this product', data: null })
     }
 
-    await pool.execute(
-      "UPDATE products SET availability = 'UNAVAILABLE' WHERE id = ? AND farmer_id = ?",
-      [request.params.id, request.user.id],
-    )
+    product.availability = 'UNAVAILABLE'
+    await product.save()
     return response.json({
       success: true,
       message: 'Product removed from availability',
-      data: { id: products[0].id, availability: 'UNAVAILABLE' },
+      data: { id: idString(product._id), availability: product.availability },
     })
   } catch (error) {
     console.error('Failed to delete product:', error)

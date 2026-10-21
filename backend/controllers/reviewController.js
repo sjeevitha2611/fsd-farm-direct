@@ -1,28 +1,52 @@
-import pool from '../config/db.js'
+import mongoose from 'mongoose'
+import Product from '../models/Product.js'
+import Review from '../models/Review.js'
+import { idString } from '../utils/serializers.js'
+
+function isValidId(id) {
+  return typeof id === 'string' && /^[\da-f]{24}$/i.test(id)
+}
+
+async function getReviewData(productId) {
+  const [reviews, [summary]] = await Promise.all([
+    Review.find({ product_id: productId })
+      .sort({ created_at: -1, _id: -1 })
+      .populate('customer_id', 'name')
+      .lean(),
+    Review.aggregate([
+      { $match: { product_id: new mongoose.Types.ObjectId(productId) } },
+      { $group: { _id: null, review_count: { $sum: 1 }, average_rating: { $avg: '$rating' } } },
+    ]),
+  ])
+
+  return {
+    review_count: summary?.review_count ?? 0,
+    average_rating: Number((summary?.average_rating ?? 0).toFixed(1)),
+    reviews: reviews.map((review) => ({
+      id: idString(review._id),
+      customer_id: idString(review.customer_id?._id),
+      customer_name: review.customer_id?.name ?? 'Customer',
+      rating: review.rating,
+      comment: review.comment,
+      created_at: review.created_at,
+    })),
+  }
+}
 
 export async function listProductReviews(request, response) {
+  if (!isValidId(request.params.productId)) {
+    return response.status(400).json({ success: false, message: 'Invalid product ID', data: null })
+  }
+
   try {
-    const [products] = await pool.execute('SELECT id FROM products WHERE id = ? LIMIT 1', [request.params.productId])
-    if (products.length === 0) {
+    const productExists = await Product.exists({ _id: request.params.productId })
+    if (!productExists) {
       return response.status(404).json({ success: false, message: 'Product not found', data: null })
     }
-
-    const [reviews] = await pool.execute(
-      `SELECT r.id, r.customer_id, u.name AS customer_name, r.rating, r.comment, r.created_at
-       FROM reviews r
-       INNER JOIN users u ON u.id = r.customer_id
-       WHERE r.product_id = ?
-       ORDER BY r.created_at DESC, r.id DESC`,
-      [request.params.productId],
-    )
-    const [summary] = await pool.execute(
-      'SELECT COUNT(*) AS review_count, COALESCE(ROUND(AVG(rating), 1), 0) AS average_rating FROM reviews WHERE product_id = ?',
-      [request.params.productId],
-    )
     return response.json({
       success: true,
       message: 'Reviews retrieved',
-      data: { ...summary[0], reviews },
+      data: await getReviewData(request.params.productId),
     })
   } catch (error) {
     console.error('Failed to retrieve reviews:', error)
@@ -39,32 +63,25 @@ export async function submitProductReview(request, response) {
   if (comment !== undefined && comment !== null && (typeof comment !== 'string' || comment.length > 65535)) {
     return response.status(400).json({ success: false, message: 'Comment must be a string', data: null })
   }
+  if (!isValidId(request.params.productId)) {
+    return response.status(400).json({ success: false, message: 'Invalid product ID', data: null })
+  }
 
   try {
-    const [products] = await pool.execute('SELECT id FROM products WHERE id = ? LIMIT 1', [request.params.productId])
-    if (products.length === 0) {
+    const productExists = await Product.exists({ _id: request.params.productId })
+    if (!productExists) {
       return response.status(404).json({ success: false, message: 'Product not found', data: null })
     }
-    await pool.execute(
-      `INSERT INTO reviews (customer_id, product_id, rating, comment)
-       VALUES (?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE rating = VALUES(rating), comment = VALUES(comment), updated_at = CURRENT_TIMESTAMP`,
-      [request.user.id, request.params.productId, rating, comment ?? null],
-    )
-    const [reviews] = await pool.execute(
-      `SELECT r.id, r.customer_id, u.name AS customer_name, r.rating, r.comment, r.created_at
-       FROM reviews r INNER JOIN users u ON u.id = r.customer_id
-       WHERE r.product_id = ? ORDER BY r.created_at DESC, r.id DESC`,
-      [request.params.productId],
-    )
-    const [summary] = await pool.execute(
-      'SELECT COUNT(*) AS review_count, COALESCE(ROUND(AVG(rating), 1), 0) AS average_rating FROM reviews WHERE product_id = ?',
-      [request.params.productId],
+
+    await Review.findOneAndUpdate(
+      { customer_id: request.user.id, product_id: request.params.productId },
+      { $set: { rating, comment: comment ?? null } },
+      { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true },
     )
     return response.status(201).json({
       success: true,
       message: 'Review saved',
-      data: { ...summary[0], reviews },
+      data: await getReviewData(request.params.productId),
     })
   } catch (error) {
     console.error('Failed to save review:', error)

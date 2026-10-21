@@ -18,14 +18,15 @@ export function authenticate(request, response, next) {
     const payload = jwt.verify(token, secret)
     if (
       typeof payload === 'string' ||
-      typeof payload.id !== 'number' && typeof payload.id !== 'string' ||
+      typeof payload.id !== 'string' ||
+      !/^[\da-f]{24}$/i.test(payload.id) ||
       typeof payload.email !== 'string' ||
-      typeof payload.role !== 'string'
+      !['farmer', 'customer', 'admin'].includes(payload.role)
     ) {
       return response.status(401).json({ success: false, message: 'Invalid authentication token' })
     }
 
-    request.user = { id: payload.id, email: payload.email, role: payload.role }
+    request.user = { id: payload.id.toLowerCase(), email: payload.email, role: payload.role }
     return next()
   } catch {
     return response.status(401).json({ success: false, message: 'Invalid or expired authentication token' })

@@ -37,9 +37,9 @@ async function startServer() {
     await Promise.all([Cart.init(), Order.init(), Product.init(), Review.init(), User.init()])
     console.log('MongoDB connection successful')
 
-    app.listen(port, () => {
-      console.log(`Farm Direct API listening on http://localhost:${port}`)
-    })
+   app.listen(port, '0.0.0.0', () => {
+  console.log(`Farm Direct API listening on port ${port}`)
+})
   } catch (error) {
     console.error('Failed to connect to MongoDB:', error.name || 'connection error')
     process.exitCode = 1
